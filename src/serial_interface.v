@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MIT
 //
 // Serial Interface Module - SPI slave for configuration management
-// Implements register read/write for Raider configuration
-// FIXED: Simplified reset logic for better synthesis compatibility
+// SYNTHESIS-FRIENDLY VERSION - Compatible with Tiny Tapeout JSON backend
+// 
+// SOLUTION: Uses mgmt_clk OR mgmt_cs_n as combined clock signal
+// This preserves original SPI timing behavior while being synthesis-friendly
 //
 `timescale 1ns/1ps
 
@@ -83,8 +85,13 @@ module serial_interface (
     // MISO shift register
     reg [7:0] miso_shift_reg;
     
-    // SPI logic - simplified reset handling for better synthesis
-    always @(posedge mgmt_clk or posedge rst) begin
+    // Synthesis-friendly clock combining: mgmt_clk OR mgmt_cs_n
+    // This allows us to respond to both mgmt_clk edges and mgmt_cs_n rising edge
+    wire mgmt_clk_or_mgmt_cs_n = mgmt_clk | mgmt_cs_n;
+    
+    // SPI logic - synthesis-friendly always block with combined clock
+    // Uses mgmt_clk OR mgmt_cs_n to preserve original timing behavior
+    always @(posedge mgmt_clk_or_mgmt_cs_n or posedge rst) begin
         if (rst) begin
             // Reset everything
             state <= IDLE;
@@ -94,7 +101,6 @@ module serial_interface (
             addr_reg <= 8'd0;
             is_write_cmd <= 1'b0;
             is_read_cmd <= 1'b0;
-            miso_shift_reg <= 8'd0;
             
             // Initialize configuration registers
             // RANGES default to 0xFFFFFF to 0xFFFFFF
@@ -113,107 +119,108 @@ module serial_interface (
             control_reg_int <= 8'h00;
             status_reg_int <= 8'h00;
             
+        end else if (mgmt_cs_n) begin
+            // CS released - triggered by mgmt_cs_n rising edge
+            // Reset state machine but keep configuration registers
+            state <= IDLE;
+            bit_count <= 3'd0;
+            mosi_shift_reg <= 8'd0;
+            cmd_reg <= 8'd0;
+            addr_reg <= 8'd0;
+            is_write_cmd <= 1'b0;
+            is_read_cmd <= 1'b0;
+            status_reg_int[0] <= 1'b0; // Clear SPI active
+            status_reg_int[1] <= 1'b0; // Clear read command flag
+            status_reg_int[2] <= 1'b0; // Clear write command flag
         end else begin
-            // Check CS state first (synchronous handling)
-            if (mgmt_cs_n) begin
-                // CS released - reset state machine but keep registers
-                state <= IDLE;
+            // mgmt_clk rising edge while CS active - normal SPI processing
+            // (mgmt_cs_n is low, so this was triggered by mgmt_clk edge)
+            
+            // CS active - SPI transaction in progress
+            status_reg_int[0] <= 1'b1; // Set SPI active
+            
+            // Shift in data
+            mosi_shift_reg <= {mosi_shift_reg[6:0], mgmt_mosi};
+            bit_count <= bit_count + 1;
+            
+            // Process byte completion
+            if (bit_count == 3'd7) begin
                 bit_count <= 3'd0;
-                mosi_shift_reg <= 8'd0;
-                cmd_reg <= 8'd0;
-                addr_reg <= 8'd0;
-                is_write_cmd <= 1'b0;
-                is_read_cmd <= 1'b0;
-                status_reg_int[0] <= 1'b0; // Clear SPI active
-                status_reg_int[1] <= 1'b0; // Clear read command flag
-                status_reg_int[2] <= 1'b0; // Clear write command flag
-            end else begin
-                // CS active - SPI transaction in progress
-                status_reg_int[0] <= 1'b1; // Set SPI active
                 
-                // Shift in data
-                mosi_shift_reg <= {mosi_shift_reg[6:0], mgmt_mosi};
-                bit_count <= bit_count + 1;
-                
-                // Process byte completion
-                if (bit_count == 3'd7) begin
-                    bit_count <= 3'd0;
+                case (state)
+                    IDLE: begin
+                        // First byte is command
+                        cmd_reg <= {mosi_shift_reg[6:0], mgmt_mosi};
+                        is_write_cmd <= ({mosi_shift_reg[6:0], mgmt_mosi} == 8'h02);
+                        is_read_cmd <= ({mosi_shift_reg[6:0], mgmt_mosi} == 8'h03);
+                        status_reg_int[1] <= ({mosi_shift_reg[6:0], mgmt_mosi} == 8'h03); // Read cmd
+                        status_reg_int[2] <= ({mosi_shift_reg[6:0], mgmt_mosi} == 8'h02); // Write cmd
+                        state <= CMD;
+                    end
                     
-                    case (state)
-                        IDLE: begin
-                            // First byte is command
-                            cmd_reg <= {mosi_shift_reg[6:0], mgmt_mosi};
-                            is_write_cmd <= ({mosi_shift_reg[6:0], mgmt_mosi} == 8'h02);
-                            is_read_cmd <= ({mosi_shift_reg[6:0], mgmt_mosi} == 8'h03);
-                            status_reg_int[1] <= ({mosi_shift_reg[6:0], mgmt_mosi} == 8'h03); // Read cmd
-                            status_reg_int[2] <= ({mosi_shift_reg[6:0], mgmt_mosi} == 8'h02); // Write cmd
-                            state <= CMD;
-                        end
+                    CMD: begin
+                        // Second byte is address
+                        addr_reg <= {mosi_shift_reg[6:0], mgmt_mosi};
                         
-                        CMD: begin
-                            // Second byte is address
-                            addr_reg <= {mosi_shift_reg[6:0], mgmt_mosi};
-                            
-                            // For read: prepare data and go to DATA state
-                            // For write: go to ADDR state to receive data byte
-                            if (is_read_cmd) begin
-                                // Load MISO shift register based on address
-                                case ({mosi_shift_reg[6:0], mgmt_mosi})
-                                    ADDR0_START_H: miso_shift_reg <= addr0_start_h;
-                                    ADDR0_START_M: miso_shift_reg <= addr0_start_m;
-                                    ADDR0_START_L: miso_shift_reg <= addr0_start_l;
-                                    ADDR0_END_H:   miso_shift_reg <= addr0_end_h;
-                                    ADDR0_END_M:   miso_shift_reg <= addr0_end_m;
-                                    ADDR0_END_L:   miso_shift_reg <= addr0_end_l;
-                                    ADDR1_START_H: miso_shift_reg <= addr1_start_h;
-                                    ADDR1_START_M: miso_shift_reg <= addr1_start_m;
-                                    ADDR1_START_L: miso_shift_reg <= addr1_start_l;
-                                    ADDR1_END_H:   miso_shift_reg <= addr1_end_h;
-                                    ADDR1_END_M:   miso_shift_reg <= addr1_end_m;
-                                    ADDR1_END_L:   miso_shift_reg <= addr1_end_l;
-                                    CONTROL_REG:   miso_shift_reg <= control_reg_int;
-                                    STATUS_REG:    miso_shift_reg <= status_reg_int;
-                                    default:       miso_shift_reg <= 8'hFF;
-                                endcase
-                                state <= DATA;  // Skip ADDR state for reads
-                            end else begin
-                                state <= ADDR;  // Go to ADDR for writes
-                            end
+                        // For read: prepare data and go to DATA state
+                        // For write: go to ADDR state to receive data byte
+                        if (is_read_cmd) begin
+                            // Load MISO shift register based on address
+                            case ({mosi_shift_reg[6:0], mgmt_mosi})
+                                ADDR0_START_H: miso_shift_reg <= addr0_start_h;
+                                ADDR0_START_M: miso_shift_reg <= addr0_start_m;
+                                ADDR0_START_L: miso_shift_reg <= addr0_start_l;
+                                ADDR0_END_H:   miso_shift_reg <= addr0_end_h;
+                                ADDR0_END_M:   miso_shift_reg <= addr0_end_m;
+                                ADDR0_END_L:   miso_shift_reg <= addr0_end_l;
+                                ADDR1_START_H: miso_shift_reg <= addr1_start_h;
+                                ADDR1_START_M: miso_shift_reg <= addr1_start_m;
+                                ADDR1_START_L: miso_shift_reg <= addr1_start_l;
+                                ADDR1_END_H:   miso_shift_reg <= addr1_end_h;
+                                ADDR1_END_M:   miso_shift_reg <= addr1_end_m;
+                                ADDR1_END_L:   miso_shift_reg <= addr1_end_l;
+                                CONTROL_REG:   miso_shift_reg <= control_reg_int;
+                                STATUS_REG:    miso_shift_reg <= status_reg_int;
+                                default:       miso_shift_reg <= 8'hFF;
+                            endcase
+                            state <= DATA;  // Skip ADDR state for reads
+                        end else begin
+                            state <= ADDR;  // Go to ADDR for writes
                         end
-                        
-                        ADDR: begin
-                            // Third byte is data (only for writes)
-                            if (is_write_cmd) begin
-                                // Write data to register
-                                case (addr_reg)
-                                    ADDR0_START_H: addr0_start_h <= {mosi_shift_reg[6:0], mgmt_mosi};
-                                    ADDR0_START_M: addr0_start_m <= {mosi_shift_reg[6:0], mgmt_mosi};
-                                    ADDR0_START_L: addr0_start_l <= {mosi_shift_reg[6:0], mgmt_mosi};
-                                    ADDR0_END_H:   addr0_end_h <= {mosi_shift_reg[6:0], mgmt_mosi};
-                                    ADDR0_END_M:   addr0_end_m <= {mosi_shift_reg[6:0], mgmt_mosi};
-                                    ADDR0_END_L:   addr0_end_l <= {mosi_shift_reg[6:0], mgmt_mosi};
-                                    ADDR1_START_H: addr1_start_h <= {mosi_shift_reg[6:0], mgmt_mosi};
-                                    ADDR1_START_M: addr1_start_m <= {mosi_shift_reg[6:0], mgmt_mosi};
-                                    ADDR1_START_L: addr1_start_l <= {mosi_shift_reg[6:0], mgmt_mosi};
-                                    ADDR1_END_H:   addr1_end_h <= {mosi_shift_reg[6:0], mgmt_mosi};
-                                    ADDR1_END_M:   addr1_end_m <= {mosi_shift_reg[6:0], mgmt_mosi};
-                                    ADDR1_END_L:   addr1_end_l <= {mosi_shift_reg[6:0], mgmt_mosi};
-                                    CONTROL_REG:   control_reg_int <= {mosi_shift_reg[6:0], mgmt_mosi};
-                                    default: ; // Ignore writes to read-only registers
-                                endcase
-                            end
-                            state <= DATA;
+                    end
+                    
+                    ADDR: begin
+                        // Third byte is data (only for writes)
+                        if (is_write_cmd) begin
+                            // Write data to register
+                            case (addr_reg)
+                                ADDR0_START_H: addr0_start_h <= {mosi_shift_reg[6:0], mgmt_mosi};
+                                ADDR0_START_M: addr0_start_m <= {mosi_shift_reg[6:0], mgmt_mosi};
+                                ADDR0_START_L: addr0_start_l <= {mosi_shift_reg[6:0], mgmt_mosi};
+                                ADDR0_END_H:   addr0_end_h <= {mosi_shift_reg[6:0], mgmt_mosi};
+                                ADDR0_END_M:   addr0_end_m <= {mosi_shift_reg[6:0], mgmt_mosi};
+                                ADDR0_END_L:   addr0_end_l <= {mosi_shift_reg[6:0], mgmt_mosi};
+                                ADDR1_START_H: addr1_start_h <= {mosi_shift_reg[6:0], mgmt_mosi};
+                                ADDR1_START_M: addr1_start_m <= {mosi_shift_reg[6:0], mgmt_mosi};
+                                ADDR1_START_L: addr1_start_l <= {mosi_shift_reg[6:0], mgmt_mosi};
+                                ADDR1_END_H:   addr1_end_h <= {mosi_shift_reg[6:0], mgmt_mosi};
+                                ADDR1_END_M:   addr1_end_m <= {mosi_shift_reg[6:0], mgmt_mosi};
+                                ADDR1_END_L:   addr1_end_l <= {mosi_shift_reg[6:0], mgmt_mosi};
+                                CONTROL_REG:   control_reg_int <= {mosi_shift_reg[6:0], mgmt_mosi};
+                                default: ; // Ignore writes to read-only registers
+                            endcase
                         end
-                        
-                        DATA: begin
-                            // Stay in DATA state for additional bytes if needed
-                        end
-                    endcase
-                end else if (is_read_cmd && state == DATA) begin
-                    // Shift MISO data during DATA state (except first bit)
-                    // The first bit is already in position from CMD state
-                    miso_shift_reg <= {miso_shift_reg[6:0], 1'b0};
-                end
+                        state <= DATA;
+                    end
+                    
+                    DATA: begin
+                        // Stay in DATA state for additional bytes if needed
+                    end
+                endcase
+            end else if (is_read_cmd && state == DATA) begin
+                // Shift MISO data during DATA state (except first bit)
+                // The first bit is already in position from CMD state
+                miso_shift_reg <= {miso_shift_reg[6:0], 1'b0};
             end
         end
     end
