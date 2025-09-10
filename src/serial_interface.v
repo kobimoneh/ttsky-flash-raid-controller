@@ -2,7 +2,7 @@
 //
 // Serial Interface Module - SPI slave for configuration management
 // Implements register read/write for Raider configuration
-// FIXED READ OPERATION - proper MISO timing
+// FIXED: Simplified reset logic for better synthesis compatibility
 //
 `timescale 1ns/1ps
 
@@ -83,10 +83,8 @@ module serial_interface (
     // MISO shift register
     reg [7:0] miso_shift_reg;
     
-    // SPI logic - single always block, SPI clock domain
-    // Asynchronously return to IDLE on mgmt_cs_n deassertion to ensure
-    // clean transaction boundaries even without further mgmt_clk edges.
-    always @(posedge mgmt_clk or posedge rst or posedge mgmt_cs_n) begin
+    // SPI logic - simplified reset handling for better synthesis
+    always @(posedge mgmt_clk or posedge rst) begin
         if (rst) begin
             // Reset everything
             state <= IDLE;
@@ -96,6 +94,7 @@ module serial_interface (
             addr_reg <= 8'd0;
             is_write_cmd <= 1'b0;
             is_read_cmd <= 1'b0;
+            miso_shift_reg <= 8'd0;
             
             // Initialize configuration registers
             // RANGES default to 0xFFFFFF to 0xFFFFFF
@@ -114,21 +113,21 @@ module serial_interface (
             control_reg_int <= 8'h00;
             status_reg_int <= 8'h00;
             
-        end else if (mgmt_cs_n) begin
-            // CS released (asynchronous) - reset state machine but keep registers
-            state <= IDLE;
-            bit_count <= 3'd0;
-            mosi_shift_reg <= 8'd0;
-            cmd_reg <= 8'd0;
-            addr_reg <= 8'd0;
-            is_write_cmd <= 1'b0;
-            is_read_cmd <= 1'b0;
-            status_reg_int[0] <= 1'b0; // Clear SPI active
-            status_reg_int[1] <= 1'b0; // Clear read command flag
-            status_reg_int[2] <= 1'b0; // Clear write command flag
         end else begin
-            // Handle CS assertion/deassertion
-            if (!mgmt_cs_n) begin
+            // Check CS state first (synchronous handling)
+            if (mgmt_cs_n) begin
+                // CS released - reset state machine but keep registers
+                state <= IDLE;
+                bit_count <= 3'd0;
+                mosi_shift_reg <= 8'd0;
+                cmd_reg <= 8'd0;
+                addr_reg <= 8'd0;
+                is_write_cmd <= 1'b0;
+                is_read_cmd <= 1'b0;
+                status_reg_int[0] <= 1'b0; // Clear SPI active
+                status_reg_int[1] <= 1'b0; // Clear read command flag
+                status_reg_int[2] <= 1'b0; // Clear write command flag
+            end else begin
                 // CS active - SPI transaction in progress
                 status_reg_int[0] <= 1'b1; // Set SPI active
                 
