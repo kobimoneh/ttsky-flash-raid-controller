@@ -25,23 +25,23 @@ module tb ();
   wire [7:0] uio_out;
   wire [7:0] uio_oe;
 
+
 `ifdef GL_TEST
-  // Instantiate the gate level netlist
-  tt_um_flash_raid_controller user_project (
-      .VGND(1'b0),
-      .VDPWR(1'b1),
-      .clk(clk),
-      .rst_n(rst_n),
-      .ena(ena),
-      .ui_in(ui_in),
-      .uo_out(uo_out),
-      .uio_in(uio_in),
-      .uio_out(uio_out),
-      .uio_oe(uio_oe)
-  );
-`else
+  wire VPWR = 1'b1;
+  wire VGND = 1'b0;
+`endif
+
+
   // Instantiate the RTL module
   tt_um_flash_raid_controller user_project (
+
+      // Include power ports for the Gate Level test:
+`ifdef GL_TEST
+      .VPWR(VPWR),
+      .VGND(VGND),
+`endif
+
+
       .clk(clk),
       .rst_n(rst_n),
       .ena(ena),
@@ -51,6 +51,5 @@ module tb ();
       .uio_out(uio_out),
       .uio_oe(uio_oe)
   );
-`endif
 
 endmodule
