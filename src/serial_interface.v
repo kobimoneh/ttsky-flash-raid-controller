@@ -132,9 +132,9 @@ module serial_interface (
             status_reg_int[0] <= 1'b0; // Clear SPI active
             status_reg_int[1] <= 1'b0; // Clear read command flag
             status_reg_int[2] <= 1'b0; // Clear write command flag
-        end else if (mgmt_clk) begin
-            // Real mgmt_clk rising edge while CS active - normal SPI processing
-            // (mgmt_cs_n is low AND mgmt_clk is high, so this was triggered by mgmt_clk edge)
+        end else if (!mgmt_cs_n) begin
+            // CS is active (low) - process SPI transaction
+            // This must be a mgmt_clk edge since CS is low and we're not in reset/CS-release
             
             // CS active - SPI transaction in progress
             status_reg_int[0] <= 1'b1; // Set SPI active
@@ -223,9 +223,9 @@ module serial_interface (
                 miso_shift_reg <= {miso_shift_reg[6:0], 1'b0};
             end
         end else begin
-            // This was triggered by CS going low (falling edge on mgmt_cs_n)
-            // Don't process any data, just maintain current state
-            // This prevents spurious operations when CS is asserted
+            // This case shouldn't occur with the combined clock design
+            // (either rst is high, mgmt_cs_n is high, or mgmt_cs_n is low)
+            // Keep as safety fallback
         end
     end
     
